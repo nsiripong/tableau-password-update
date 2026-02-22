@@ -1,13 +1,24 @@
 """
 update_tableau_password.py
 ==========================
-This script automatically updates the embedded Snowflake password for a specified user
-across all Tableau datasources AND workbooks on your Tableau Server.
+This script automatically updates the embedded Snowflake crednetials across all 
+Tableau datasources and workbooks that you own on your Tableau Server.
+
+It supports two modes, controlled entirely by your .env file:
+
+  PASSWORD ROTATION (most common)
+    Update the password on connections already using sf_username.
+    Leave sf_old_username blank or omit it from your .env file.
+
+  USERNAME + PASSWORD MIGRATION
+    Rename a Snowflake account and update its password at the same time.
+    Set sf_old_username to the current (old) username in your .env file.
+    The script will find all connections using that old username and update
+    them to use sf_username and sf_password.
 
 HOW TO USE:
   1. Make sure your .env file is set up (see the required keys listed below).
-  2. Update the USER_TO_UPDATE and NEW_PASSWORD values in the CONFIG section below.
-  3. Run the script:  python update_tableau_password.py
+  2. Run the script:  python update_tableau_password.py
 
 REQUIRED .env FILE KEYS:
   ts_token          - Your Tableau Personal Access Token name
@@ -16,6 +27,12 @@ REQUIRED .env FILE KEYS:
   server_url        - Your Tableau Server base URL (e.g. "https://tableau.yourdomain.com")
   sf_username       - The Snowflake username whose password needs updating (e.g. NAS230@PITT.EDU)
   sf_password       - The new Snowflake password to embed
+
+
+OPTIONAL .env FILE KEYS:
+  sf_old_username   - The current Snowflake username to search for (migration mode only).
+                      If blank or omitted, the script runs in password rotation mode
+                      and searches for connections already using sf_username.
 """
 
 import requests
@@ -24,17 +41,15 @@ import os
 import sys
 from dotenv import load_dotenv
 
-# ─────────────────────────────────────────────
-#  CONFIG — nothing to edit here anymore!
-#  All credentials are now loaded from your .env file.
-#  See the REQUIRED .env FILE KEYS section at the top of this file.
-# ─────────────────────────────────────────────
-
 
 def load_env_or_exit():
-    """Load environment variables and exit with a clear error if any are missing."""
+    """
+    Load environment variables and exit with a clear error if any are missing.
+    """
+
     load_dotenv()
     required_keys = ["ts_token", "ts_secret", "api_version", "server_url", "sf_username", "sf_password"]
+
     config = {}
     missing = []
 
@@ -52,14 +67,20 @@ def load_env_or_exit():
         print("\nPlease add them to your .env file and try again.")
         sys.exit(1)
 
+    # sf_old_username is optional — if present and non-empty, migration mode is active
+    config["sf_old_username"] = os.getenv("sf_old_username", "").strip()
+
     return config
 
 
 def authenticate(config):
     """
     Log in to the Tableau REST API using a Personal Access Token.
-    Returns the auth header and the site-level base URL needed for all future calls.
+    Returns the auth header, site-level base URL, and the token owner's username.
+    The username is fetched via a second API call since the sign-in response
+    only returns the user's ID.
     """
+
     url = f"{config['server_url']}/api/{config['api_version']}/auth/signin"
     payload = {
         "credentials": {
@@ -116,6 +137,7 @@ def get_all_pages(base_url, key, headers, page_size=100):
     request one at a time). This helper keeps fetching pages until it has everything.
     Returns a flat list of all items found.
     """
+    
     items = []
     page = 0
     total_available = 1  # start with 1 so the loop runs at least once
@@ -138,9 +160,9 @@ def filter_owned_items(items, token_username, dtype):
       - owned: items where the token user is the owner (safe to update)
       - skipped: items owned by someone else (we likely lack permission)
 
-    This is like checking which filing cabinets you have a key to before
-    trying to open them — skipping the ones that belong to someone else
-    avoids permission errors and saves time.
+    Returns only the items owned by the token user — these are the ones
+    we have permission to update. Items owned by others are skipped and
+    a count is printed so the user knows they weren't forgotten.
     """
     owned = []
     skipped = []
@@ -207,17 +229,21 @@ def find_matching_connections(item, dtype, username, site_url, headers):
     return matched
 
 
-def update_password(record, new_password, site_url, headers):
+def update_connection(record, new_username, new_password, site_url, headers):
     """
     Send the updated password to Tableau for a single connection.
+    Accepts both a new username and new password, supporting both
+    password rotation (same username) and migration (new username).
     Returns True if successful, False otherwise.
     """
+    
     endpoint = "workbooks" if record["dtype"] == "workbook" else "datasources"
-    url = f"{site_url}/{endpoint}/{record['item_id']}/connections/{record['connection_id']}"
-
+    url = (f"{site_url}/{endpoint}/{record['item_id']}"
+           f"/connections/{record['connection_id']}")
+    
     payload = {
         "connection": {
-            "userName": record["userName"].lower(),
+            "userName": new_username.lower(),
             "password": new_password,
             "embedPassword": "true"
         }
@@ -233,13 +259,30 @@ def update_password(record, new_password, site_url, headers):
 
 
 def main():
-    # Step 1 — Load credentials from .env
+    # Step 1 — Load credentials and settings from .env
     config = load_env_or_exit()
 
-    user_to_update = config["sf_username"]
+    new_username = config["sf_username"]
     new_password = config["sf_password"]
+    old_username = config["sf_old_username"]
 
-    # Step 2 — Log in and get auth token
+    # Determine mode based on whether sf_old_username is set.
+    # In rotation mode, we search for connections using sf_username (password only).
+    # In migration mode, we search for sf_old_username and swap to sf_username + new password.
+    if old_username:
+        mode = "migration"
+        target_username = old_username
+        print("Mode: USERNAME + PASSWORD MIGRATION")
+        print(f"  Searching for connections using: {old_username}")
+        print(f"  Will update to username: {new_username} with new password\n")
+    else:
+        mode = "rotation"
+        target_username = new_username
+        print("Mode: PASSWORD ROTATION")
+        print(f"  Searching for connections using: {new_username}")
+        print("  Will update password only (username unchanged)\n")
+
+    # Step 2 — Authenticate
     headers, site_url, token_username = authenticate(config)
 
     # Step 3 — Fetch all datasources and workbooks from the server
@@ -266,35 +309,44 @@ def main():
     print(f"  {len(workbooks)} workbook(s) owned by you and eligible for update.\n")
 
     # Step 4 — Find all connections that use our target user + Snowflake
-    print(f"Scanning for Snowflake connections using username: {user_to_update}")
+    print(f"Scanning for Snowflake connections using username: {target_username}")
     matching_connections = []
 
     for ds in datasources:
-        matches = find_matching_connections(ds, "datasource", user_to_update, site_url, headers)
+        matches = find_matching_connections(ds, "datasource", target_username, 
+                                            site_url, headers)
         matching_connections.extend(matches)
 
     for wb in workbooks:
-        matches = find_matching_connections(wb, "workbook", user_to_update, site_url, headers)
+        matches = find_matching_connections(wb, "workbook", target_username, 
+                                            site_url, headers)
         matching_connections.extend(matches)
 
     if not matching_connections:
-        print(f"\nNo matching Snowflake connections found for user '{user_to_update}'.")
+        key = "sf_old_username" if mode == "migration" else "sf_username"
+        print(f"\nNo matching Snowflake connections found for user '{target_username}'.")
         print("Nothing to update. Double-check the sf_username value in your .env file.")
         sys.exit(0)
 
     print(f"\nFound {len(matching_connections)} connection(s) to update:\n")
     for i, cx in enumerate(matching_connections, 1):
         loc = cx.get("project") or cx.get("url") or "—"
-        print(f"  {i}. [{cx['dtype'].upper()}] {cx['item_name']}  |  Owner: {cx['owner']}  |  Location: {loc}")
-
+        if mode == "migration":
+            print(f"  {i}. [{cx['dtype'].upper()}] {cx['item_name']}  "
+                  f"|  {cx['current_username']} → {new_username}  |  Location: {loc}")
+        else:
+            print(f"  {i}. [{cx['dtype'].upper()}] {cx['item_name']}  "
+                  f"|  Owner: {cx['owner']}  |  Location: {loc}")
+            
     # Step 5 — Update all matching connections
-    print(f"\nUpdating passwords...\n")
+    action = "credentials" if mode == "migration" else "passwords"
+    print(f"\nUpdating {action}...\n")
     success_count = 0
     fail_count = 0
 
     for cx in matching_connections:
         print(f"  Updating '{cx['item_name']}' ({cx['dtype']})...", end=" ")
-        if update_password(cx, new_password, site_url, headers):
+        if update_connection(cx, new_username, new_password, site_url, headers):
             print("OK")
             success_count += 1
         else:

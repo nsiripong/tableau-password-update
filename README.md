@@ -10,7 +10,7 @@ When a Snowflake password changes, any Tableau datasource or workbook with that 
 | File | Purpose |
 |------|---------|
 | `src/update_tableau_password.py` | The **full script** — updates all eligible datasources and workbooks in one run |
-| `src/update_tableau_password_TEST.py` | The **test script** — runs on a single named item so you can verify everything works before running the full script |
+| `src/update_one_password.py` | The **test script** — runs on a single named item so you can verify everything works before running the full script |
 | `.env.example` | A template showing all the required configuration values |
 | `.gitignore` | Prevents your `.env` file (which contains credentials) from being accidentally committed |
 
@@ -18,16 +18,23 @@ When a Snowflake password changes, any Tableau datasource or workbook with that 
 
 ## How it works
 
+The scripts support two modes, controlled entirely by your `.env` file — no code changes needed.
+
+**Password rotation** (most common) — update the password on connections already using `sf_username`. Leave `sf_old_username` blank or omit it.
+
+**Username + password migration** — rename a Snowflake account and update its password at the same time. Set `sf_old_username` to the current (old) username. The scripts will find all connections using that old username and update them to use `sf_username` and `sf_password`.
+
 ### Full script (`update_tableau_password.py`)
 
-1. Authenticates with your Tableau Server using a Personal Access Token
-2. Fetches every datasource and workbook on the site
-3. Filters down to only items **you own** (since you can only update credentials on assets you own)
-4. Scans those items for Snowflake connections that use the specified username
-5. Updates the embedded password on every matching connection
-6. Prints a summary of what was updated and flags any failures
+1. Reads the mode from your `.env` file and prints which mode is active
+2. Authenticates with your Tableau Server using a Personal Access Token
+3. Fetches every datasource and workbook on the site
+4. Filters down to only items **you own** (since you can only update credentials on assets you own)
+5. Scans those items for Snowflake connections that use the specified username
+6. Updates the embedded password on every matching connection
+7. Prints a summary of what was updated and flags any failures
 
-### Test script (`update_tableau_password_TEST.py`)
+### Test script (`update_one_password.py`)
 
 Works exactly the same way as the full script, but scoped to a **single datasource or workbook** that you specify by name. It also pauses before making any changes and asks you to confirm. The intended workflow is:
 
@@ -115,8 +122,9 @@ All configuration lives in your `.env` file. Here is a description of each key:
 | `ts_secret` | The secret value of your Tableau Personal Access Token | `xxxx-xxxx-xxxx` |
 | `api_version` | The Tableau REST API version your server uses | `3.19` |
 | `server_url` | The base URL of your Tableau Server, no trailing slash | `https://tableau.pitt.edu` |
-| `sf_username` | The Snowflake username whose password needs updating | `NAS230@PITT.EDU` |
+| `sf_username` | The Snowflake username whose password needs updating | `ABC123@PITT.EDU` |
 | `sf_password` | The new Snowflake password to embed in all matching connections | `your-new-password` |
+| `sf_old_username` | No | The current (old) Snowflake username to search for. Set this to enable migration mode. Leave blank or omit for password rotation. | `OLD123@PITT.EDU` |
 
 If you're not sure which API version your server uses, you can find it in Tableau Server's admin settings, or ask your Tableau Server administrator.
 
@@ -125,12 +133,19 @@ If you're not sure which API version your server uses, you can find it in Tablea
 ## Example `.env` file
 
 ```
+# Tableau authentication
 ts_token=password-updater
 ts_secret=xxxx-xxxx-xxxx-xxxx
 api_version=3.19
 server_url=https://tableau.pitt.edu
-sf_username=NAS230@PITT.EDU
+
+# Snowflake credentials
+sf_username=ABC123@PITT.EDU
 sf_password=your-new-snowflake-password
+
+# Leave sf_old_username blank for password rotation.
+# Set it to the old username to enable migration mode.
+sf_old_username=
 ```
 
 ---

@@ -1,0 +1,12 @@
+# Credentials — never commit this
+.env
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+env/
+venv/
+.vscode/

@@ -1,4 +1,5 @@
 # Tableau Snowflake Password Updater
+_Claude's Sonnet 4.6 was used in development and streamlining of this code._
 
 When a Snowflake password changes, any Tableau datasource or workbook with that password embedded will break until it's manually updated. This tool automates that process — scanning your Tableau Server for all affected connections and updating them in bulk, so you don't have to track them down and fix them one by one.
 
